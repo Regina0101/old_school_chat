@@ -1,30 +1,16 @@
 import asyncio
 import logging
+from datetime import datetime
 
-import httpx
 import websockets
 import names
 from websockets import WebSocketServerProtocol
 from websockets.exceptions import ConnectionClosedOK
+import json
+import main
+from aiofile import async_open
 
 logging.basicConfig(level=logging.INFO)
-
-
-async def request(url: str) -> dict | str:
-    async with httpx.AsyncClient() as client:
-        r = await client.get(url)
-        if r.status_code == 200:
-            result = r.json()
-            return result
-        else:
-            return "Не вийшло в мене взнати курс. Приват не відповідає :)"
-
-
-async def get_exchange():
-    response = await request(f'https://api.privatbank.ua/p24api/pubinfo?exchange&coursid=5')
-    # переробить на більш придатний результат
-    return str(response)
-
 
 class Server:
     clients = set()
@@ -40,33 +26,39 @@ class Server:
 
     async def send_to_clients(self, message: str):
         if self.clients:
-            [await client.send(message) for client in self.clients]
+            await asyncio.gather(*(client.send(message) for client in self.clients))
 
     async def ws_handler(self, ws: WebSocketServerProtocol):
         await self.register(ws)
         try:
-            await self.distrubute(ws)
+            await self.distribute(ws)
         except ConnectionClosedOK:
             pass
         finally:
             await self.unregister(ws)
 
-    async def distrubute(self, ws: WebSocketServerProtocol):
+
+    async def log_to_file(self, user_name, date, time):
+        async with async_open("log.txt", "a" ) as file:
+            await file.write(f"{user_name} executed 'exchange' command on {date} at {time} \n")
+
+    async def distribute(self, ws: WebSocketServerProtocol):
         async for message in ws:
-            if message == "exchange":
-                exchange = await get_exchange()
-                await self.send_to_clients(exchange)
+            parts = message.split()
+            if len(parts) == 2 and parts[0] == "exchange" and parts[1].isdigit():
+                days = int(parts[1])
+                exchange = await main.get_currency_rate(days)
+                await self.send_to_clients(json.dumps(exchange, indent=4, ensure_ascii=False))
+                await self.log_to_file(ws.name, datetime.now().strftime('%d.%m.%Y'), datetime.now().strftime("%H:%M:%S.%f")[:-6])
             elif message == 'Hello server':
                 await self.send_to_clients("Привіт мої карапузи!")
             else:
                 await self.send_to_clients(f"{ws.name}: {message}")
 
-
-async def main():
+async def server_start():
     server = Server()
-    async with websockets.serve(server.ws_handler, '0.0.0.0', 8080):
+    async with websockets.serve(server.ws_handler, 'localhost', 8080):
         await asyncio.Future()  # run forever
 
-
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.run(server_start())
